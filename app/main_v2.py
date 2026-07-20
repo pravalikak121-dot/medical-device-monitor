@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from datetime import timedelta
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import List, Optional
 
 from app.database_connection import get_db, init_db
 from app.auth import (
@@ -15,7 +15,8 @@ from app.auth import (
     decode_access_token
 )
 from app.models import User, Device, Alert, UserRole
-from app.pdf_service import generate_device_report_pdf
+from app.pdf_service import generate_device_report_pdf, generate_alert_summary_pdf
+from app.email_service import send_alert_email
 from app.ai_service import generate_alert_summary, generate_batch_summary
 from app.simulator import calculate_status
 
@@ -29,7 +30,6 @@ app = FastAPI(
 )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
 
 # Pydantic models
 class UserCreate(BaseModel):
@@ -162,7 +162,11 @@ def get_devices(current_user: User = Depends(get_current_user), db: Session = De
     """Get all devices (filtered by user role)"""
     if current_user.role == UserRole.ADMIN:
         devices = db.query(Device).all()
+    elif current_user.role == UserRole.DOCTOR:
+        # Doctors see their assigned devices
+        devices = db.query(Device).filter(Device.assigned_to_user_id == current_user.id).all()
     else:
+        # Nurses and technicians see their assigned devices
         devices = db.query(Device).filter(Device.assigned_to_user_id == current_user.id).all()
     
     return [
@@ -220,6 +224,7 @@ def get_device(
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
+    # Check permissions
     if current_user.role != UserRole.ADMIN and device.assigned_to_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -238,7 +243,7 @@ def get_device(
 # Alert endpoints
 @app.get("/api/v1/alerts")
 def get_alerts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get alerts"""
+    """Get alerts (filtered by user role)"""
     if current_user.role == UserRole.ADMIN:
         alerts = db.query(Alert).filter(Alert.is_resolved == False).all()
     else:
@@ -267,11 +272,12 @@ def create_alert(
     current_user: User = Depends(require_doctor_or_admin),
     db: Session = Depends(get_db)
 ):
-    """Create an alert"""
+    """Create an alert (Doctor or Admin only)"""
     device = db.query(Device).filter(Device.id == alert.device_id).first()
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     
+    # Generate AI summary
     ai_summary = generate_alert_summary({
         "device_id": device.device_id,
         "alert_type": alert.alert_type,
@@ -323,7 +329,7 @@ def get_device_report_pdf(current_user: User = Depends(require_doctor_or_admin),
     pdf_bytes = generate_device_report_pdf(device_dicts)
     
     return {
-        "pdf": pdf_bytes.hex(),
+        "pdf": pdf_bytes.hex(),  # Return as hex for JSON serialization
         "content_type": "application/pdf",
         "filename": "device_health_report.pdf"
     }
