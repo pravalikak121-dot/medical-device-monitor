@@ -50,6 +50,7 @@ class DeviceCreate(BaseModel):
     device_type: str = Field(default="Sleep Therapy Monitor")
     battery_level: int = Field(..., ge=0, le=100, example=87)
     signal_strength: int = Field(..., ge=0, le=100, example=92)
+    assigned_to_user_id: Optional[int] = None
 
 
 class AlertCreate(BaseModel):
@@ -150,6 +151,35 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     return {"access_token": access_token, "token_type": "bearer"}
 
 
+@app.get("/api/v1/users")
+def get_users(role: Optional[UserRole] = None, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    """Get users, optionally filtering by role (admin only)"""
+    query = db.query(User)
+    if role is not None:
+        query = query.filter(User.role == role)
+    users = query.order_by(User.username).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role.value
+        }
+        for u in users
+    ]
+
+
+@app.get("/api/v1/users/me")
+def get_current_user_info(current_user: User = Depends(get_current_user)):
+    """Return current authenticated user info"""
+    return {
+        "id": current_user.id,
+        "username": current_user.username,
+        "email": current_user.email,
+        "role": current_user.role.value
+    }
+
+
 # Health check
 @app.get("/health")
 def health_check():
@@ -165,7 +195,6 @@ def get_devices(current_user: User = Depends(get_current_user), db: Session = De
     else:
         devices = db.query(Device).filter(Device.assigned_to_user_id == current_user.id).all()
     
-    return [
         {
             "id": d.id,
             "device_id": d.device_id,
@@ -174,7 +203,9 @@ def get_devices(current_user: User = Depends(get_current_user), db: Session = De
             "status": d.status,
             "battery_level": d.battery_level,
             "signal_strength": d.signal_strength,
-            "last_sync": d.last_sync
+            "last_sync": d.last_sync,
+            "assigned_to_user_id": d.assigned_to_user_id,
+            "assigned_to_username": d.assigned_to_user.username if d.assigned_to_user else None
         }
         for d in devices
     ]
@@ -183,13 +214,17 @@ def get_devices(current_user: User = Depends(get_current_user), db: Session = De
 @app.post("/api/v1/devices", status_code=201)
 def create_device(
     device: DeviceCreate,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a new device (Admin only)"""
+    """Create a new device"""
     existing = db.query(Device).filter(Device.device_id == device.device_id).first()
     if existing:
         raise HTTPException(status_code=409, detail="Device already exists")
+    
+    assigned_to_user_id = current_user.id
+    if current_user.role == UserRole.ADMIN and device.assigned_to_user_id is not None:
+        assigned_to_user_id = device.assigned_to_user_id
     
     status_value = calculate_status(device.battery_level, device.signal_strength)
     new_device = Device(
@@ -199,7 +234,7 @@ def create_device(
         battery_level=device.battery_level,
         signal_strength=device.signal_strength,
         status=status_value,
-        assigned_to_user_id=current_user.id
+        assigned_to_user_id=assigned_to_user_id
     )
     db.add(new_device)
     db.commit()
@@ -231,7 +266,9 @@ def get_device(
         "status": device.status,
         "battery_level": device.battery_level,
         "signal_strength": device.signal_strength,
-        "last_sync": device.last_sync
+        "last_sync": device.last_sync,
+        "assigned_to_user_id": device.assigned_to_user_id,
+        "assigned_to_username": device.assigned_to_user.username if device.assigned_to_user else None
     }
 
 
@@ -302,31 +339,35 @@ def create_alert(
 @app.get("/api/v1/reports/devices/pdf")
 def get_device_report_pdf(current_user: User = Depends(require_doctor_or_admin), db: Session = Depends(get_db)):
     """Generate device health report in PDF"""
-    if current_user.role == UserRole.ADMIN:
-        devices = db.query(Device).all()
-    else:
-        devices = db.query(Device).filter(Device.assigned_to_user_id == current_user.id).all()
-    
-    device_dicts = [
-        {
-            "device_id": d.device_id,
-            "patient_id": d.patient_id,
-            "device_type": d.device_type,
-            "status": d.status,
-            "battery_level": d.battery_level,
-            "signal_strength": d.signal_strength,
-            "last_sync": d.last_sync.isoformat() if d.last_sync else ""
+    try:
+        if current_user.role == UserRole.ADMIN:
+            devices = db.query(Device).all()
+        else:
+            devices = db.query(Device).filter(Device.assigned_to_user_id == current_user.id).all()
+        
+        device_dicts = [
+            {
+                "device_id": d.device_id,
+                "patient_id": d.patient_id,
+                "device_type": d.device_type,
+                "status": d.status,
+                "battery_level": d.battery_level,
+                "signal_strength": d.signal_strength,
+                "last_sync": d.last_sync.isoformat() if d.last_sync else ""
+            }
+            for d in devices
+        ]
+        
+        pdf_bytes = generate_device_report_pdf(device_dicts)
+        
+        import base64
+        return {
+            "pdf": base64.b64encode(pdf_bytes).decode('utf-8'),
+            "content_type": "application/pdf",
+            "filename": "device_health_report.pdf"
         }
-        for d in devices
-    ]
-    
-    pdf_bytes = generate_device_report_pdf(device_dicts)
-    
-    return {
-        "pdf": pdf_bytes.hex(),
-        "content_type": "application/pdf",
-        "filename": "device_health_report.pdf"
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
 
 @app.get("/api/v1/reports/alerts/summary")

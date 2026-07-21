@@ -4,7 +4,7 @@ import streamlit as st
 import time
 from datetime import datetime
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = "http://127.0.0.1:8001"
 
 st.set_page_config(
     page_title="Healthcare Device Monitor",
@@ -100,6 +100,76 @@ def dashboard_page():
     
     headers = {"Authorization": f"Bearer {st.session_state.token}"}
     
+    user_info = None
+    is_admin = False
+    doctor_options = []
+    assigned_doctor_id = None
+
+    try:
+        current_user_response = requests.get(
+            f"{API_URL}/api/v1/users/me",
+            headers=headers,
+            timeout=10
+        )
+        if current_user_response.status_code == 200:
+            user_info = current_user_response.json()
+            is_admin = user_info.get("role") == "admin"
+
+        if is_admin:
+            doctors_response = requests.get(
+                f"{API_URL}/api/v1/users?role=doctor",
+                headers=headers,
+                timeout=10
+            )
+            if doctors_response.status_code == 200:
+                doctors = doctors_response.json()
+                doctor_options = ["None"] + [f"{d['username']} ({d['email']})" for d in doctors]
+                doctor_ids = {f"{d['username']} ({d['email']})": d['id'] for d in doctors}
+
+    except Exception:
+        pass
+
+    with st.expander("➕ Add New Device", expanded=True):
+        new_device_id = st.text_input("Device ID", key="new_device_id")
+        new_patient_id = st.text_input("Patient ID", key="new_patient_id")
+        new_device_type = st.text_input("Device Type", value="Sleep Therapy Monitor", key="new_device_type")
+        new_battery = st.number_input("Battery Level", min_value=0, max_value=100, value=100, key="new_battery")
+        new_signal = st.number_input("Signal Strength", min_value=0, max_value=100, value=100, key="new_signal")
+        if is_admin and doctor_options:
+            assign_choice = st.selectbox("Assign to doctor", doctor_options, key="assign_doctor")
+            if assign_choice != "None":
+                assigned_doctor_id = doctor_ids.get(assign_choice)
+
+        if st.button("Save Device", key="save_device"):
+            try:
+                payload = {
+                    "device_id": new_device_id,
+                    "patient_id": new_patient_id,
+                    "device_type": new_device_type,
+                    "battery_level": int(new_battery),
+                    "signal_strength": int(new_signal)
+                }
+                if is_admin and assigned_doctor_id is not None:
+                    payload["assigned_to_user_id"] = assigned_doctor_id
+
+                create_response = requests.post(
+                    f"{API_URL}/api/v1/devices",
+                    headers=headers,
+                    json=payload,
+                    timeout=10
+                )
+                if create_response.status_code == 201:
+                    st.success("Device saved successfully. Refreshing device list...")
+                    st.rerun()
+                else:
+                    try:
+                        error_detail = create_response.json().get("detail", create_response.text)
+                    except Exception:
+                        error_detail = create_response.text
+                    st.error(f"Failed to save device: {error_detail}")
+            except Exception as e:
+                st.error(f"Error saving device: {str(e)}")
+
     try:
         # Fetch devices and alerts
         devices_response = requests.get(
@@ -201,15 +271,17 @@ def dashboard_page():
                     
                     if response.status_code == 200:
                         data = response.json()
-                        pdf_bytes = bytes.fromhex(data["pdf"])
+                        import base64
+                        pdf_bytes = base64.b64decode(data["pdf"])
                         st.download_button(
-                            label="Download PDF",
+                            label="📥 Download PDF",
                             data=pdf_bytes,
                             file_name=data["filename"],
                             mime=data["content_type"]
                         )
+                        st.success("✅ PDF report generated successfully!")
                     else:
-                        st.error("Failed to generate report")
+                        st.error(f"Failed to generate report: {response.text}")
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
         

@@ -9,7 +9,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use pbkdf2_sha256 to avoid platform-specific bcrypt backend issues
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 
 class Token(BaseModel):
@@ -28,7 +29,15 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     """Hash a password"""
-    return pwd_context.hash(password)
+    # bcrypt has a 72-byte password limit; truncate to avoid runtime errors
+    try:
+        pw_bytes = password.encode("utf-8")
+    except Exception:
+        pw_bytes = str(password).encode("utf-8")
+
+    if len(pw_bytes) > 72:
+        pw_bytes = pw_bytes[:72]
+    return pwd_context.hash(pw_bytes)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
