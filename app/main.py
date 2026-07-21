@@ -208,8 +208,6 @@ def get_devices(current_user: User = Depends(get_current_user), db: Session = De
             "assigned_to_username": d.assigned_to_user.username if d.assigned_to_user else None
         }
         for d in devices
-    ]
-
 
 @app.post("/api/v1/devices", status_code=201)
 def create_device(
